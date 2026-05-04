@@ -1,4 +1,6 @@
 # blog/router.py
+import json
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -12,16 +14,24 @@ from blog.schema import (
 )
 from users.models import User
 from dependencies import get_current_user
+import redis.asyncio as aioredis
+import os
 
 router = APIRouter(prefix="/blog",tags=["Blog"])
+
+REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379")
+redis_client = None
+
+async def get_redis():
+    global redis_client
+    if redis_client is None:
+        redis_client = await aioredis.from_url(REDIS_URL)
+    return redis_client
 
 
 
 @router.post("/categories", response_model=CategoryResponse, status_code=201)
-async def create_category(
-    data: CategoryCreate,
-    db: AsyncSession = Depends(get_db),
-):
+async def create_category( data: CategoryCreate,db: AsyncSession = Depends(get_db),):
     result = await db.execute(select(Category).where(Category.name == data.name))
     if result.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="Bu kategoriya allaqachon mavjud")
@@ -59,11 +69,23 @@ async def create_post(
 
 
 @router.get("/posts", response_model=list[PostResponse])
-async def get_posts(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(Post).where(Post.is_published == True)
-    )
-    return result.scalars().all()
+async def get_posts(
+    db: AsyncSession = Depends(get_db),
+    redis=Depends(get_redis)
+):
+    cached = await redis.get("posts")
+    if cached:
+        return json.loads(cached)  
+
+    result = await db.execute()
+    posts = result.scalars().all()
+
+    await redis.set("posts", json.dumps(
+        [{"id": p.id, "title": p.title, "content": p.content} for p in posts]
+    ), ex=60)
+
+    return posts
+
 
 
 @router.get("/posts/{post_id}", response_model=PostDetailResponse)
